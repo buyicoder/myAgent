@@ -1,18 +1,20 @@
 """
 定时搜索国内 VR / A 轮融资情况，并整理成 Excel。
 
-当前版本（便于测试）：
-- 脚本一运行就立刻抓取一次并生成一份 Excel。
-- 之后每分钟再抓取一次，并在控制台打印「距离下次抓取还有 X 秒」的倒计时。
-- 每一份 Excel 的文件名精确到分钟，不会覆盖原文件。
-- 所有 Excel 文件统一保存在脚本同级目录下的 `vr_reports/` 文件夹中。
-- 与 LLM 联动：对抓取到的网页正文让 AI 做结构化抽取，再整理成统一格式写入 Excel。
+当前版本（更系统化）：
+- 不是依赖单一数据源，而是「全网搜索 + 站点筛选 + AI 抽取」组合：
+  - 多组关键词在搜索引擎上全网搜索；
+  - 对结果按域名做白名单 / 黑名单过滤（优先新闻/行业媒体等站点）；
+  - 抓取网页正文，喂给 LLM，让其抽取结构化融资事件；
+  - 聚合去重后生成 Excel。
+- 脚本一运行就立刻抓取一次并生成一份 Excel，之后每分钟再跑一次，并打印倒计时。
+- 每一份 Excel 的文件名精确到分钟，不会覆盖原文件，统一保存在 `vr_reports/` 文件夹。
 """
 import datetime
 import json
 import time
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -21,19 +23,72 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-from config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, QCC_API_KEY, QCC_SECRET_KEY
-from data_sources.qcc_client import fetch_vr_financing_qcc
+from config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 
+
+# 多组关键词，全网搜索 VR / XR 相关公司的各轮次融资信息（更贴近媒体标题写法）
+BASE_QUERIES = [
+    # 泛融资 + VR/XR 语境
+    "VR 公司 完成 融资",
+    "VR 公司 完成 新一轮 融资",
+    "虚拟现实 初创 获 融资",
+    "XR AR VR 创业公司 获 投资",
+    "元宇宙 公司 完成 融资",
+    "VR/AR/XR 公司 融资消息",
+    # 加上年份约束，偏向最近几年
+    "2023 VR 公司 融资",
+    "2024 VR 公司 融资",
+    "2025 VR 公司 融资",
+    # 金额表达
+    "VR 公司 获 数千万元 融资",
+    "VR 公司 获 数亿人民币 融资",
+]
+
+# 站点前缀：既有全网，也偏向科技/创投媒体
+SITE_PREFIXES = [
+    "",
+    "site:36kr.com ",
+    "site:huxiu.com ",
+]
 
 SEARCH_CONFIGS = [
-    # 更偏向新闻/信息站，而不是问答社区
-    {"query": "site:36kr.com VR A轮 融资", "industry": "VR"},
-    {"query": "site:36kr.com 虚拟现实 A轮 融资", "industry": "VR"},
-    {"query": "site:36kr.com XR AR VR A轮 融资", "industry": "VR/AR/XR"},
-    {"query": "site:36kr.com 元宇宙 A轮 融资", "industry": "VR/AR/XR"},
-    # 兜底：不限定站点的通用查询（可能夹杂问答社区）
-    {"query": "国内 VR 公司 A轮 融资", "industry": "VR"},
+    {"query": prefix + q, "industry": "VR/AR/XR"}
+    for prefix in SITE_PREFIXES
+    for q in BASE_QUERIES
 ]
+
+# 域名白名单：优先保留这些站点（行业/科技/新闻等）
+ALLOWED_DOMAINS = [
+    "36kr.com",
+    "36kr.net",
+    "huxiu.com",
+    "tech.163.com",
+    "finance.sina.com.cn",
+    "www.sina.com.cn",
+    "www.jiemian.com",
+    "www.yicai.com",
+    "www.thepaper.cn",
+    "www.cs.com.cn",
+]
+
+# 域名黑名单：尽量过滤掉不适合做结构化融资抽取的站点
+BLOCKED_DOMAINS = [
+    "zhihu.com",
+    "zhidao.baidu.com",
+    "baike.baidu.com",
+    "baidu.com/s",
+]
+
+# 运行时动态累积的黑名单：多次访问失败的站点会加入这里
+RUNTIME_BLOCKED_DOMAINS: Set[str] = set()
+
+
+def _domain(url: str) -> str:
+    try:
+        host = url.split("//", 1)[-1].split("/", 1)[0]
+        return host.lower()
+    except Exception:
+        return ""
 
 
 def _get_llm_client() -> OpenAI:
@@ -45,7 +100,13 @@ def _get_llm_client() -> OpenAI:
 
 def _search_bing(query: str, limit: int = 10) -> List[Dict[str, str]]:
     url = "https://www.bing.com/search"
-    params = {"q": query}
+    # 尝试一次多拿一些结果，并偏向中文
+    params = {
+        "q": query,
+        "count": 30,          # 请求更多结果（具体生效与否取决于 Bing）
+        "setLang": "zh-cn",
+        "cc": "CN",
+    }
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -63,18 +124,33 @@ def _search_bing(query: str, limit: int = 10) -> List[Dict[str, str]]:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     results: List[Dict[str, str]] = []
+    raw_results: List[Dict[str, str]] = []
     for li in soup.select("li.b_algo"):
         a = li.select_one("h2 a")
         if not a:
             continue
         title = a.get_text(strip=True)
         link = a.get("href", "")
-        # 跳过容易 403 或文本价值较低的站点（如知乎问答页）
-        if any(bad in link for bad in ["zhihu.com/question", "zhihu.com/topic"]):
-            continue
         snippet_el = li.select_one(".b_caption p")
         snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-        results.append({"title": title, "link": link, "snippet": snippet})
+        raw_results.append({"title": title, "link": link, "snippet": snippet})
+
+    # 先按白名单过滤其一批结果，若为空，再用黑名单过滤后的通用结果兜底
+    allowed: List[Dict[str, str]] = []
+    fallback: List[Dict[str, str]] = []
+    for item in raw_results:
+        dom = _domain(item["link"])
+        # 静态黑名单和运行时黑名单都跳过
+        if any(bad in dom for bad in BLOCKED_DOMAINS) or dom in RUNTIME_BLOCKED_DOMAINS:
+            continue
+        if any(allowed_dom in dom for allowed_dom in ALLOWED_DOMAINS):
+            allowed.append(item)
+        else:
+            fallback.append(item)
+
+    ordered = allowed + fallback
+    for item in ordered:
+        results.append(item)
         if len(results) >= limit:
             break
     return results
@@ -93,6 +169,10 @@ def _fetch_page_text(url: str) -> str:
         resp.raise_for_status()
     except Exception as e:
         print(f"获取网页失败：{url} - {e}")
+        dom = _domain(url)
+        if dom:
+            RUNTIME_BLOCKED_DOMAINS.add(dom)
+            print(f"已将站点加入运行时黑名单：{dom}")
         return ""
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -135,10 +215,10 @@ def _llm_structured_extract(client: OpenAI, page_text: str, url: str, industry: 
         return []
     system_prompt = (
         "你是一个专业的一级市场投融资分析助手。"
-        "现在给你一篇网页的正文内容，请你从中提取**所有与国内 VR / AR / XR 等相关公司 A 轮、A+ 轮、A++ 轮、Pre-A 轮等相近早期轮次融资事件**。"
+        "现在给你一篇网页的正文内容，请你从中提取**所有与国内 VR / AR / XR 等相关公司的各轮次股权融资事件**。"
         "输出严格的 JSON 数组，每个元素是一个对象，字段包括：\n"
         "- 公司名称（string）\n"
-        "- 轮次（string，如 A轮、A+轮、Pre-A轮）\n"
+        "- 轮次（string，如 天使轮、A轮、A+轮、B轮、C轮、战略融资 等）\n"
         "- 融资金额（string，例如 “数千万元人民币”、“1亿元人民币”等）\n"
         "- 融资时间（string，尽量用 YYYY-MM 或 YYYY-MM-DD；若无法确定，可写“未知”）\n"
         "- 行业（string，例如 VR、AR、XR，若无法确定，可写“未知”）\n"
@@ -197,37 +277,66 @@ def _llm_structured_extract(client: OpenAI, page_text: str, url: str, industry: 
 
 def fetch_vr_financing_data() -> List[Dict[str, str]]:
     """
-    优先使用企查查 API（若已配置 QCC_API_KEY、QCC_SECRET_KEY），
-    否则回退到：必应搜索 → 抓网页正文 → LLM 抽取 → 统一格式。
+    全网搜索 + 站点筛选 + AI 抽取：
+    1. 用多组 VR + A 轮关键词在搜索引擎上检索；
+    2. 按域名白名单/黑名单筛选站点（优先新闻/行业媒体）；
+    3. 抓取网页正文，喂给 LLM 做结构化融资事件抽取；
+    4. 聚合去重后返回统一格式列表。
     """
-    if QCC_API_KEY and QCC_SECRET_KEY:
-        print("使用企查查 API 拉取 VR 融资数据...")
-        try:
-            records = fetch_vr_financing_qcc(QCC_API_KEY, QCC_SECRET_KEY)
-            if records:
-                print(f"企查查共返回 {len(records)} 条 VR 融资记录。")
-            else:
-                print("企查查未返回符合条件的数据。")
-            return records
-        except Exception as e:
-            print(f"企查查 API 调用失败，回退到网页+LLM 方式: {e}")
-
-    # 回退：必应 + 网页正文 + LLM 抽取
     client = _get_llm_client()
     all_records: Dict[str, Dict[str, str]] = {}
+    search_report: List[Dict[str, str]] = []
 
     for cfg in SEARCH_CONFIGS:
         query = cfg["query"]
         industry = cfg["industry"]
         print(f"正在搜索：{query}")
-        results = _search_bing(query, limit=5)
+        results = _search_bing(query, limit=20)
+        if not results:
+            search_report.append(
+                {
+                    "query": query,
+                    "url": "",
+                    "domain": "",
+                    "status": "搜索无结果",
+                }
+            )
+            continue
+
         for r in results:
             url = r["link"]
+            dom = _domain(url)
             print(f"  解析网页：{url}")
             page_text = _fetch_page_text(url)
             if not page_text:
+                search_report.append(
+                    {
+                        "query": query,
+                        "url": url,
+                        "domain": dom,
+                        "status": "获取失败或内容为空",
+                    }
+                )
                 continue
             extracted = _llm_structured_extract(client, page_text, url, industry)
+            if not extracted:
+                search_report.append(
+                    {
+                        "query": query,
+                        "url": url,
+                        "domain": dom,
+                        "status": "已抓取正文，未提取到融资事件",
+                    }
+                )
+                continue
+            search_report.append(
+                {
+                    "query": query,
+                    "url": url,
+                    "domain": dom,
+                    "status": f"提取到 {len(extracted)} 条融资事件",
+                }
+            )
             for item in extracted:
                 key = f"{item.get('公司名称','')}|{item.get('轮次','')}|{item.get('融资时间','')}"
                 if key in all_records:
@@ -236,18 +345,31 @@ def fetch_vr_financing_data() -> List[Dict[str, str]]:
 
     records = list(all_records.values())
     if not records:
-        print("本次未能从网页中提取到任何 VR 融资记录。")
+        print("本次未能从网页中提取到任何 VR/XR 融资记录。")
     else:
-        print(f"本次共从网页中提取出 {len(records)} 条 VR 融资记录。")
+        print(f"本次共从网页中提取出 {len(records)} 条 VR/XR 融资记录。")
+
+    # 打印搜索报告，帮助你理解这一轮到底搜到了什么
+    print("\n===== 本轮搜索报告 =====")
+    if not search_report:
+        print("本次搜索未能从搜索引擎拿到任何可用网页结果。")
+    else:
+        for entry in search_report:
+            q = entry["query"]
+            dom = entry["domain"] or "-"
+            status = entry["status"]
+            url = entry["url"] or "-"
+            print(f"[{q}] {dom} | {status} | {url}")
+    print("===== 搜索报告结束 =====\n")
+
     return records
 
 
 def export_to_excel(records: List[Dict[str, str]], filename: Path) -> None:
-    """将融资数据写入 Excel 文件（覆盖写）。"""
-    if not records:
-        print("没有可写入的数据，跳过生成 Excel。")
-        return
+    """将融资数据写入 Excel 文件（覆盖写）。
 
+    即使本次没有抓到任何记录，也会生成带表头的空模板，方便你查看结构。
+    """
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "VR融资情况"
@@ -256,9 +378,13 @@ def export_to_excel(records: List[Dict[str, str]], filename: Path) -> None:
     headers = ["公司名称", "轮次", "融资金额", "融资时间", "行业", "来源"]
     ws.append(headers)
 
-    for item in records:
-        row = [item.get(h, "") for h in headers]
-        ws.append(row)
+    if not records:
+        # 没有数据时，仅写入表头，方便你确认列定义
+        print("本次没有抓到任何记录，将生成只包含表头的空 Excel 模板。")
+    else:
+        for item in records:
+            row = [item.get(h, "") for h in headers]
+            ws.append(row)
 
     # 自动列宽（简单根据最大长度估算）
     for idx, header in enumerate(headers, start=1):
