@@ -48,8 +48,9 @@ BLOCKED_DOMAINS = [
     "baidu.com/s",
 ]
 
-# 运行时动态累积的黑名单：多次访问失败的站点会加入这里
+# 运行时动态累积的黑名单：多次访问失败或总是无有效信息的站点会加入这里
 RUNTIME_BLOCKED_DOMAINS: Set[str] = set()
+DOMAIN_NO_INFO_COUNTS: Dict[str, int] = {}
 
 
 def _domain(url: str) -> str:
@@ -361,6 +362,12 @@ def fetch_vr_financing_data() -> List[Dict[str, str]]:
                 continue
             extracted = _llm_structured_extract(client, page_text, url, industry)
             if not extracted:
+                # 统计“有正文但无有效融资信息”的站点，超过阈值则加入运行时黑名单
+                if dom:
+                    DOMAIN_NO_INFO_COUNTS[dom] = DOMAIN_NO_INFO_COUNTS.get(dom, 0) + 1
+                    if DOMAIN_NO_INFO_COUNTS[dom] >= 3 and dom not in RUNTIME_BLOCKED_DOMAINS:
+                        RUNTIME_BLOCKED_DOMAINS.add(dom)
+                        print(f"站点多次无有效融资信息，已加入运行时黑名单：{dom}")
                 search_report.append(
                     {
                         "query": query,
