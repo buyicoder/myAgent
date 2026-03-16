@@ -26,37 +26,6 @@ from openai import OpenAI
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 
 
-# 多组关键词，全网搜索 VR / XR 相关公司的各轮次融资信息（更贴近媒体标题写法）
-BASE_QUERIES = [
-    # 泛融资 + VR/XR 语境
-    "VR 公司 完成 融资",
-    "VR 公司 完成 新一轮 融资",
-    "虚拟现实 初创 获 融资",
-    "XR AR VR 创业公司 获 投资",
-    "元宇宙 公司 完成 融资",
-    "VR/AR/XR 公司 融资消息",
-    # 加上年份约束，偏向最近几年
-    "2023 VR 公司 融资",
-    "2024 VR 公司 融资",
-    "2025 VR 公司 融资",
-    # 金额表达
-    "VR 公司 获 数千万元 融资",
-    "VR 公司 获 数亿人民币 融资",
-]
-
-# 站点前缀：既有全网，也偏向科技/创投媒体
-SITE_PREFIXES = [
-    "",
-    "site:36kr.com ",
-    "site:huxiu.com ",
-]
-
-SEARCH_CONFIGS = [
-    {"query": prefix + q, "industry": "VR/AR/XR"}
-    for prefix in SITE_PREFIXES
-    for q in BASE_QUERIES
-]
-
 # 域名白名单：优先保留这些站点（行业/科技/新闻等）
 ALLOWED_DOMAINS = [
     "36kr.com",
@@ -96,6 +65,71 @@ def _get_llm_client() -> OpenAI:
     if OPENAI_BASE_URL:
         kwargs["base_url"] = OPENAI_BASE_URL
     return OpenAI(**kwargs)
+
+
+def _plan_search(client: OpenAI) -> List[Dict[str, str]]:
+    """
+    让 LLM 先根据目标“VR/XR 相关公司融资事件”生成一组搜索计划，
+    然后再按计划去搜索。
+
+    期望返回结构：[{ "query": "...", "industry": "VR/AR/XR" }, ...]
+    """
+    system_prompt = (
+        "你是一个搜索策略专家，目标是帮助用户通过中文互联网找到"
+        "「与 VR / AR / XR / 元宇宙 相关公司的各轮次股权融资事件」的新闻或报道。"
+        "你只需要设计搜索引擎用的查询语句，不需要去实际搜索。"
+    )
+    user_prompt = (
+        "请设计一组用于必应(Bing)的中文搜索查询，用来尽可能全面地找到"
+        "与 VR/AR/XR/元宇宙 相关公司的融资新闻（不限轮次，包含天使轮、A/B/C轮、战略融资等）。\n\n"
+        "要求：\n"
+        "1. 返回一个 JSON 数组，每个元素是一个对象，字段：query（搜索关键词）、industry（统一填 \"VR/AR/XR\"）。\n"
+        "2. query 要贴近真实媒体标题写法，可以包含：\n"
+        "   - “完成融资”“获融资”“新一轮融资”“融资消息”等表述；\n"
+        "   - VR/AR/XR/虚拟现实/元宇宙 等行业词；\n"
+        "   - 可以适当加入 2023/2024/2025 等年份，偏向近几年；\n"
+        "3. 数量 8~12 条之间，不要重复或仅做极细微改动的查询；\n"
+        "4. 严格只输出 JSON，不要有任何解释或额外文字。"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        content = resp.choices[0].message.content or "[]"
+        data = _extract_json_from_text(content)
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            raise ValueError("LLM 返回格式不是数组")
+        plan: List[Dict[str, str]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("query") or "").strip()
+            if not q:
+                continue
+            industry = str(item.get("industry") or "VR/AR/XR").strip() or "VR/AR/XR"
+            plan.append({"query": q, "industry": industry})
+        # 兜底：至少要有几条
+        if not plan:
+            raise ValueError("计划为空")
+        return plan
+    except Exception as e:
+        print(f"LLM 生成搜索计划失败，将回退到内置默认计划: {e}")
+        # 内置一个简单的兜底计划，避免完全不可用
+        fallback = [
+            {"query": "VR 公司 完成 融资", "industry": "VR/AR/XR"},
+            {"query": "虚拟现实 公司 获 新一轮 融资", "industry": "VR/AR/XR"},
+            {"query": "XR AR VR 创业公司 融资 消息", "industry": "VR/AR/XR"},
+            {"query": "元宇宙 公司 完成 融资", "industry": "VR/AR/XR"},
+        ]
+        return fallback
 
 
 def _search_bing(query: str, limit: int = 10) -> List[Dict[str, str]]:
@@ -287,7 +321,14 @@ def fetch_vr_financing_data() -> List[Dict[str, str]]:
     all_records: Dict[str, Dict[str, str]] = {}
     search_report: List[Dict[str, str]] = []
 
-    for cfg in SEARCH_CONFIGS:
+    # 先让 LLM 生成一份搜索计划
+    search_plan = _plan_search(client)
+    print("本轮搜索计划：")
+    for cfg in search_plan:
+        print(f"  - query={cfg['query']} | industry={cfg['industry']}")
+    print()
+
+    for cfg in search_plan:
         query = cfg["query"]
         industry = cfg["industry"]
         print(f"正在搜索：{query}")
