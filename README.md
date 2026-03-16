@@ -33,7 +33,10 @@ conda activate agent
 pip install -r requirements.txt
 ```
 
-依赖包括：`openai`（调用大模型）、`python-dotenv`（从 `.env` 读配置）。
+依赖包括：
+- `openai`：调用大模型
+- `python-dotenv`：从 `.env` 读配置
+- `requests` / `schedule` / `openpyxl`：用于定时任务和导出 Excel
 
 ---
 
@@ -60,6 +63,7 @@ Agent/
 ├── tools.py          # 工具定义（名字、描述、参数、实现）
 ├── agent.py          # Agent 核心：对话 + 工具调用循环
 ├── main.py           # 主入口：终端对话
+├── vr_financing_scheduler.py  # 定时抓取 VR / 融资信息并写 Excel 的脚本
 ├── requirements.txt  # pip 依赖（Conda 已通过 environment.yml 安装）
 └── README.md
 ```
