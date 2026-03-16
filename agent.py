@@ -4,7 +4,7 @@ Agent 核心：与 LLM 对话，解析工具调用，执行工具并循环直到
 import json
 from openai import OpenAI
 
-from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from tools import TOOLS, TOOL_FUNCTIONS
 
 
@@ -32,7 +32,10 @@ def run_agent(user_message: str, max_rounds: int = 5) -> str:
     运行 Agent：发用户消息给 LLM，若有 tool_calls 就执行工具并把结果送回，循环直到无工具调用或达到最大轮数。
     返回最后一轮助手的文本回复。
     """
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    kwargs = {"api_key": OPENAI_API_KEY}
+    if OPENAI_BASE_URL:
+        kwargs["base_url"] = OPENAI_BASE_URL
+    client = OpenAI(**kwargs)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -40,7 +43,7 @@ def run_agent(user_message: str, max_rounds: int = 5) -> str:
 
     for _ in range(max_rounds):
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=OPENAI_MODEL,
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",

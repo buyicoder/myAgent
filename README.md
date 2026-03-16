@@ -4,25 +4,30 @@
 
 ---
 
-## 第一步：准备环境
+## 第一步：准备环境（Miniconda）
 
-### 1.1 安装 Python
+### 1.1 安装 Miniconda
 
-- 确保本机已安装 **Python 3.10+**。
-- 在终端执行：`python --version` 或 `python3 --version` 检查。
+- 若未安装，请到 [Miniconda 官网](https://docs.conda.io/en/latest/miniconda.html) 下载并安装（选 Python 3.x 版本）。
+- 安装后重启终端，执行 `conda --version` 检查是否可用。
 
-### 1.2 创建虚拟环境（推荐）
+### 1.2 创建并激活 Conda 环境
 
 在项目根目录 `Agent` 下执行：
 
 ```bash
-python -m venv venv
+conda env create -f environment.yml
+conda activate agent
 ```
 
-- Windows 激活：`venv\Scripts\activate`
-- macOS/Linux：`source venv/bin/activate`
+- Windows 激活：`conda activate agent`
+- macOS/Linux：`conda activate agent`
 
-### 1.3 安装依赖
+（`environment.yml` 已包含 Python 3.10+ 和项目依赖，无需再单独执行 pip install。）
+
+### 1.3 若需手动安装依赖
+
+若你已用 `conda create -n agent python=3.10` 建好环境，可再执行：
 
 ```bash
 pip install -r requirements.txt
@@ -50,11 +55,12 @@ pip install -r requirements.txt
 Agent/
 ├── .env              # 你的配置（不要提交到 Git）
 ├── .env.example      # 配置示例
+├── environment.yml   # Conda 环境定义（Python + 依赖）
 ├── config.py         # 读取环境变量
 ├── tools.py          # 工具定义（名字、描述、参数、实现）
 ├── agent.py          # Agent 核心：对话 + 工具调用循环
 ├── main.py           # 主入口：终端对话
-├── requirements.txt
+├── requirements.txt  # pip 依赖（Conda 已通过 environment.yml 安装）
 └── README.md
 ```
 
@@ -65,7 +71,7 @@ Agent/
 
 ## 第四步：运行 Agent
 
-在项目根目录、已激活虚拟环境的情况下执行：
+在项目根目录、已激活 Conda 环境（`conda activate agent`）的情况下执行：
 
 ```bash
 python main.py

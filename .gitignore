@@ -2,6 +2,9 @@
 venv/
 .venv/
 .env
+# Conda 若在项目下建环境目录可忽略
+env/
+.conda/
 *.pyc
 __pycache__/
 *.pyo
