@@ -52,6 +52,9 @@ BLOCKED_DOMAINS = [
 RUNTIME_BLOCKED_DOMAINS: Set[str] = set()
 DOMAIN_NO_INFO_COUNTS: Dict[str, int] = {}
 
+# 永久黑名单文件路径（当前脚本同级目录）
+RUNTIME_BLACKLIST_PATH = Path(__file__).resolve().parent / "vr_runtime_blacklist.txt"
+
 
 def _domain(url: str) -> str:
     try:
@@ -59,6 +62,19 @@ def _domain(url: str) -> str:
         return host.lower()
     except Exception:
         return ""
+
+
+# 启动时尝试加载历史运行生成的永久黑名单，加入到运行时黑名单中
+try:
+    if RUNTIME_BLACKLIST_PATH.exists():
+        for line in RUNTIME_BLACKLIST_PATH.read_text(encoding="utf-8").splitlines():
+            dom = line.strip()
+            if dom and not dom.startswith("#"):
+                RUNTIME_BLOCKED_DOMAINS.add(dom.lower())
+        if RUNTIME_BLOCKED_DOMAINS:
+            print(f"已从 vr_runtime_blacklist.txt 加载 {len(RUNTIME_BLOCKED_DOMAINS)} 个永久黑名单域名。")
+except Exception as e:
+    print(f"加载永久黑名单失败：{e}")
 
 
 def _get_llm_client() -> OpenAI:
@@ -409,6 +425,15 @@ def fetch_vr_financing_data() -> List[Dict[str, str]]:
             url = entry["url"] or "-"
             print(f"[{q}] {dom} | {status} | {url}")
     print("===== 搜索报告结束 =====\n")
+
+    # 在一轮搜索结束后，把当前运行时黑名单持久化到文件中，形成“永久黑名单”
+    try:
+        if RUNTIME_BLOCKED_DOMAINS:
+            text = "\n".join(sorted(RUNTIME_BLOCKED_DOMAINS))
+            RUNTIME_BLACKLIST_PATH.write_text(text, encoding="utf-8")
+            print(f"已更新永久黑名单文件：{RUNTIME_BLACKLIST_PATH}，共 {len(RUNTIME_BLOCKED_DOMAINS)} 个域名。")
+    except Exception as e:
+        print(f"写入永久黑名单失败：{e}")
 
     return records
 
