@@ -93,6 +93,29 @@ def upload_file_to_feishu(
     return file_token
 
 
+def _synced_record_path(project_root: Optional[Path] = None) -> Path:
+    """已同步到飞书的文件记录表路径（每行一个文件绝对路径）。"""
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    return project_root / ".feishu_synced.txt"
+
+
+def _load_synced_set(record_path: Path) -> set:
+    """读取已同步文件集合。"""
+    if not record_path.exists():
+        return set()
+    return {line.strip() for line in record_path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
+def mark_as_synced(file_path: Path, project_root: Optional[Path] = None) -> None:
+    """将本地文件标记为已同步到飞书，避免重复上传。"""
+    path = Path(file_path).resolve()
+    record_path = _synced_record_path(project_root)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(record_path, "a", encoding="utf-8") as f:
+        f.write(str(path) + "\n")
+
+
 def upload_if_configured(
     file_path: Path,
     app_id: Optional[str] = None,
@@ -101,6 +124,7 @@ def upload_if_configured(
 ) -> bool:
     """
     若已配置飞书三项则上传，否则跳过。用于调度脚本中“可选上传”。
+    上传成功后会写入 .feishu_synced.txt，后续同步时不会重复上传。
 
     :return: 是否执行了上传
     """
@@ -113,8 +137,56 @@ def upload_if_configured(
         return False
     try:
         upload_file_to_feishu(Path(file_path), folder_token, app_id, app_secret)
+        mark_as_synced(Path(file_path))
         print(f"已上传到飞书云文档：{file_path.name}")
         return True
     except Exception as e:
         print(f"飞书上传失败：{e}")
         return False
+
+
+def sync_local_excel_to_feishu(project_root: Optional[Path] = None) -> int:
+    """
+    将 vr_reports/ 和 vr_reports_qcc/ 下尚未同步过的 Excel 文件上传到飞书。
+    已同步过的路径记录在项目根目录 .feishu_synced.txt 中。
+
+    :param project_root: 项目根目录，默认取本文件所在目录的上一级
+    :return: 本次新上传的文件数量
+    """
+    from config import FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_FOLDER_TOKEN
+
+    if not (FEISHU_APP_ID and FEISHU_APP_SECRET and FEISHU_FOLDER_TOKEN):
+        print("未配置飞书（FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_FOLDER_TOKEN），跳过同步。")
+        return 0
+
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(project_root)
+    record_path = _synced_record_path(project_root)
+    synced = _load_synced_set(record_path)
+
+    to_upload: list = []
+    for folder in ["vr_reports", "vr_reports_qcc"]:
+        d = project_root / folder
+        if not d.is_dir():
+            continue
+        for f in d.glob("*.xlsx"):
+            path_str = str(f.resolve())
+            if path_str not in synced:
+                to_upload.append(f)
+
+    if not to_upload:
+        print("没有需要同步到飞书的新 Excel 文件。")
+        return 0
+
+    print(f"正在将 {len(to_upload)} 个已导出的 Excel 同步到飞书...")
+    uploaded = 0
+    for path in sorted(to_upload):
+        try:
+            upload_file_to_feishu(path, FEISHU_FOLDER_TOKEN, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            mark_as_synced(path, project_root)
+            uploaded += 1
+            print(f"  已上传：{path.name}")
+        except Exception as e:
+            print(f"  上传失败 {path.name}：{e}")
+    return uploaded

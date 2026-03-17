@@ -98,6 +98,13 @@ def run_scheduler() -> None:
     - 启动时立即执行一次；
     - 之后每 60 分钟执行一次（企查查接口有调用成本，频率不宜太高，可按需调整）。
     """
+    # 启动时先同步本地已导出的 Excel 到飞书（若已配置飞书）
+    try:
+        from data_sources.feishu_upload import sync_local_excel_to_feishu
+        sync_local_excel_to_feishu()
+    except Exception as e:
+        print(f"启动时飞书同步跳过或失败：{e}")
+
     schedule.clear()
     schedule.every(60).minutes.do(job_once)
     print("企查查定时任务已启动：每 60 分钟拉取一次 VR/XR 融资数据并生成 Excel（vr_reports_qcc）。按 Ctrl+C 可退出。")

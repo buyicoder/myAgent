@@ -498,6 +498,13 @@ def run_scheduler() -> None:
     - 之后每 1 分钟执行一次 job_once，并在控制台打印倒计时。
     - 真正上线时可以改回每天某个固定时间。
     """
+    # 启动时先同步本地已导出的 Excel 到飞书（若已配置飞书）
+    try:
+        from data_sources.feishu_upload import sync_local_excel_to_feishu
+        sync_local_excel_to_feishu()
+    except Exception as e:
+        print(f"启动时飞书同步跳过或失败：{e}")
+
     schedule.clear()
     schedule.every(1).minutes.do(job_once)
     print("定时任务已启动：每 1 分钟抓取一次必应搜索结果并生成 VR 融资 Excel。按 Ctrl+C 可退出。")

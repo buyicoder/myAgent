@@ -2,6 +2,7 @@
 venv/
 .venv/
 .env
+.feishu_synced.txt
 # Conda 若在项目下建环境目录可忽略
 env/
 .conda/
