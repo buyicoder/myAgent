@@ -476,14 +476,18 @@ def export_to_excel(records: List[Dict[str, str]], filename: Path) -> None:
 
 
 def job_once() -> None:
-    """执行一次：抓取数据并写入 Excel。"""
+    """执行一次：抓取数据并写入 Excel，若已配置飞书则上传到云文档。"""
     print(f"[{datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}] 开始抓取 VR / A 轮融资数据...")
     data = fetch_vr_financing_data()
-    # 文件名中包含日期 + 小时分钟，避免覆盖历史版本
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
     reports_dir = Path(__file__).resolve().parent / "vr_reports"
     filename = reports_dir / f"vr_financing_{ts}.xlsx"
     export_to_excel(data, filename)
+    try:
+        from data_sources.feishu_upload import upload_if_configured
+        upload_if_configured(filename)
+    except Exception as e:
+        print(f"飞书上传跳过或失败：{e}")
     print(f"[{datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}] 本次任务完成。")
 
 
